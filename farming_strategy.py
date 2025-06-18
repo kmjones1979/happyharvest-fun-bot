@@ -83,19 +83,26 @@ class FarmingStrategy:
     
     def recommend_crop(self, available_water: int, land_size: int, market_analysis: Dict) -> Optional[Dict]:
         """Recommend the best crop to plant based on strategy"""
-        # VICTORY MODE: Be more aggressive with water reserves
-        # If we have multiple empty plots, be more aggressive about planting
-        if land_size >= 3:  # 3+ empty plots = victory opportunity!
-            min_reserve = max(3, MIN_WATER_RESERVE // 4)  # Use 1/4 normal reserve
-        elif land_size >= 2:  # 2 empty plots = good opportunity  
-            min_reserve = max(5, MIN_WATER_RESERVE // 3)  # Use 1/3 normal reserve
+        # ULTRA-EMERGENCY MODE: Minimal reserves when behind in competition!
+        # If we have ANY empty plots and low water, be EXTREMELY aggressive
+        if land_size >= 3:  # 3+ empty plots = EMERGENCY MODE!
+            min_reserve = 1  # Keep only 1 water for safety
+        elif land_size >= 2:  # 2 empty plots = very aggressive
+            min_reserve = 1  # Keep only 1 water
+        elif land_size >= 1:  # 1 empty plot = ULTRA-AGGRESSIVE for victory
+            min_reserve = 1  # Keep only 1 water - we need to plant!
         else:
-            min_reserve = max(8, MIN_WATER_RESERVE // 2)  # Use half normal reserve
+            min_reserve = max(5, MIN_WATER_RESERVE // 3)  # Normal mode when land is full
         
         if available_water < min_reserve:
             return None
         
         affordable_water = available_water - min_reserve
+        
+        # VICTORY HACK: If we still can't afford anything, try with ZERO reserves!
+        if affordable_water < 6 and land_size >= 1:  # Can't afford cheapest crop
+            affordable_water = available_water  # Use ALL water for victory!
+            min_reserve = 0
         
         # If no market analysis opportunities, try all crops
         opportunities = market_analysis.get('opportunities', [])
@@ -121,14 +128,29 @@ class FarmingStrategy:
         if not affordable_crops:
             return None
         
-        # Sort by efficiency primarily, but also consider market price for victory
-        affordable_crops.sort(
-            key=lambda x: (
-                x['crop'].get('efficiency', 0),  # Primary: efficiency
-                x['crop'].get('marketPrice', 0)  # Secondary: market price
-            ),
-            reverse=True
-        )
+        # EMERGENCY PRIORITIZATION: For victory, prioritize credits per minute!
+        # But also consider total credits to avoid micro-farming
+        def calculate_crop_score(crop_data):
+            crop = crop_data['crop']
+            grow_time_minutes = crop.get('growTimeMinutes', crop.get('growTimeHours', 1) * 60)
+            credits = crop.get('marketPrice', 0)
+            water_cost = crop.get('waterCost', 1)
+            
+            if grow_time_minutes <= 0:
+                return 0
+            
+            credits_per_minute = credits / grow_time_minutes
+            
+            # EMERGENCY: If we're behind, prioritize speed over total credits
+            # But avoid crops that give too few total credits
+            if credits < 0.5:  # Avoid micro-credit crops
+                return credits_per_minute * 0.1  # Heavy penalty
+            elif credits < 2.0:  # Small credit crops get moderate penalty
+                return credits_per_minute * 0.5
+            else:  # Good credit crops get full score
+                return credits_per_minute
+        
+        affordable_crops.sort(key=calculate_crop_score, reverse=True)
         
         return affordable_crops[0]['crop']
     
@@ -175,7 +197,7 @@ class FarmingStrategy:
         return harvestable
     
     def should_expand_land(self, profile: Dict, land_data: Dict) -> bool:
-        """Determine if we should expand our land with better economic analysis"""
+        """Determine if we should expand our land with emergency competitive analysis"""
         current_water = profile.get('score', 0)
         
         if not land_data.get('landClaimed'):
@@ -189,29 +211,31 @@ class FarmingStrategy:
         if current_water < next_expansion_cost:
             return False
         
-        # Calculate expansion ROI
+        # EMERGENCY COMPETITIVE MODE: Prioritize getting to 3×3 for premium crops!
+        if current_land_tiles <= 4:  # 2×2 → 3×3 is CRITICAL for competition
+            # Be EXTREMELY aggressive about this expansion - it unlocks premium farming
+            water_threshold = next_expansion_cost * 0.8  # Expand when we have 80% of cost
+            
+            # Special case: If we're falling behind (less than 20 credits), be even more aggressive
+            current_credits = profile.get('credits', 0)
+            if current_credits < 20:  # Emergency mode - we're losing!
+                water_threshold = next_expansion_cost * 0.7  # Expand at 70% of cost
+                
+            return current_water >= water_threshold
+        
+        # Calculate expansion ROI for larger expansions
         expansion_roi = self.calculate_expansion_roi(land_data, current_water)
         
         # Expansion strategy based on current situation
-        if current_land_tiles == 1:  # 1x1 → 2x2 (adds 3 tiles)
-            # This is the most important expansion - 4x more land!
-            # Be more aggressive: expand when we have 2/3 of the cost
-            return current_water >= next_expansion_cost * 0.67
-        
-        elif current_land_tiles <= 4:  # 2x2 → 3x3 (adds 5 tiles)
-            # Good ROI expansion, but be more conservative
+        if current_land_tiles <= 9:  # 3×3 → 4×4 (adds 7 tiles)
+            # Good expansion, but be more conservative after getting 3×3
             return (current_water >= next_expansion_cost + MIN_WATER_RESERVE and
                     expansion_roi > 0.15)  # 15% ROI threshold
         
-        elif current_land_tiles <= 9:  # 3x3 → 4x4 (adds 7 tiles)
-            # Only expand if we're swimming in water and ROI is excellent
-            return (current_water >= next_expansion_cost + (MIN_WATER_RESERVE * 2) and
-                    expansion_roi > 0.25)  # 25% ROI threshold
-        
         else:
-            # Beyond 4x4, only expand if extremely profitable
-            return (current_water >= next_expansion_cost + 100 and
-                    expansion_roi > 0.35)  # 35% ROI threshold
+            # Beyond 4×4, only expand if extremely profitable
+            return (current_water >= next_expansion_cost + 50 and
+                    expansion_roi > 0.25)  # 25% ROI threshold
     
     def calculate_expansion_roi(self, land_data: Dict, current_water: int) -> float:
         """Calculate the expected ROI from land expansion"""
